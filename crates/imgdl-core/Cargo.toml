@@ -1,0 +1,43 @@
+[package]
+name = "imgdl-core"
+description = "High-performance concurrent image downloader (HTTP/2 multiplexing, Tokio + Hyper)."
+keywords = ["http", "download", "images", "concurrent", "hyper"]
+categories = ["network-programming", "asynchronous"]
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+
+[dependencies]
+tokio = { version = "1", features = ["full"] }
+hyper = { version = "1", features = ["client", "http1", "http2"] }
+hyper-util = { version = "0.1", features = ["tokio", "http1", "http2"] }
+http = "1"
+http-body-util = "0.1"
+bytes = "1"
+tokio-rustls = "0.26"
+rustls = { version = "0.23", default-features = false, features = [
+    "ring",
+    "tls12",
+] }
+rustls-pki-types = "1"
+webpki-roots = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tracing = { workspace = true }
+sha2 = "0.10"
+indexmap = "2"
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["full", "test-util"] }
+hyper = { version = "1", features = ["server"] }
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+wiremock = "0.6"
+tempfile = "3"
+
+[lints]
+workspace = true

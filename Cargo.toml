@@ -1,0 +1,90 @@
+[workspace]
+resolver = "3"
+members = ["crates/*"]
+
+# ---------------------------------------------------------------------------
+# Single source of truth for the release version.
+#
+# `pyproject.toml` declares `dynamic = ["version"]`, so maturin reads the
+# version from the binding crate, which inherits it from here. There is exactly
+# one place to bump: `just bump 0.3.0`.
+# ---------------------------------------------------------------------------
+[workspace.package]
+version = "0.2.0"
+edition = "2021"
+rust-version = "1.85"
+license = "MIT"
+repository = "https://github.com/aliciusschroeder/imgdl"
+homepage = "https://github.com/aliciusschroeder/imgdl"
+authors = ["Alicius Schröder"]
+
+[workspace.dependencies]
+imgdl-core = { path = "crates/imgdl-core", version = "0.2.0" }
+
+pyo3 = "0.28"
+pyo3-stub-gen = "0.19"
+pyo3-build-config = "0.28"
+
+tracing = "0.1"
+
+# ---------------------------------------------------------------------------
+# Profiles
+#
+# `opt-level = "s"` + fat LTO is the tuning this codebase was benchmarked with
+# (the workload is network-bound; smaller code = better i-cache behaviour).
+# Do not "upgrade" it to opt-level = 3 without re-running `just bench`.
+#
+# NOTE: never set `panic = "abort"` here. PyO3 turns Rust panics into Python
+# exceptions by unwinding; aborting would take the host interpreter with it.
+# ---------------------------------------------------------------------------
+[profile.release]
+opt-level = "s"
+lto = "fat"
+codegen-units = 1
+strip = "symbols"
+
+# Dependencies are rebuilt rarely; optimise them even in dev builds so that
+# `maturin develop` (debug) is usable for smoke tests instead of 20-50x slower.
+[profile.dev.package."*"]
+opt-level = 2
+
+# Coverage builds: no LTO (it wrecks llvm-cov line mapping), keep debug info.
+[profile.coverage]
+inherits = "dev"
+debug = true
+
+# Benchmarks want real optimisation but readable profiles.
+[profile.bench]
+inherits = "release"
+strip = "none"
+debug = true
+
+# ---------------------------------------------------------------------------
+# Lints live here, not in CI flags. `cargo clippy` on a laptop and `cargo
+# clippy` in CI then mean the same thing, and a new crate inherits them by
+# adding two lines to its manifest.
+# ---------------------------------------------------------------------------
+[workspace.lints.rust]
+unsafe_code = "deny"
+missing_debug_implementations = "warn"
+unreachable_pub = "warn"
+rust_2018_idioms = { level = "warn", priority = -1 }
+
+# The default clippy set, plus the lints that catch real bugs rather than style
+# preferences. This configuration is green on the current tree, so `-D warnings`
+# in CI is a meaningful gate from day one rather than a wall of noise everyone
+# learns to scroll past.
+#
+# To tighten it: add `pedantic = { level = "warn", priority = -1 }` below and
+# work through the result a module at a time. It is worth doing; it is not
+# worth blocking every PR on until it is done.
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }
+dbg_macro = "deny"
+todo = "deny"
+unimplemented = "warn"
+mem_forget = "deny"
+# Style lints that this codebase already satisfies and should keep satisfying.
+uninlined_format_args = "warn"
+explicit_iter_loop = "warn"
+manual_let_else = "warn"

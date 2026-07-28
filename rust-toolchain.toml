@@ -1,0 +1,5 @@
+[toolchain]
+channel = "1.95"
+components = ["rustfmt", "clippy", "llvm-tools-preview"]
+# Wheel targets are added on demand by CI; listing them here would force every
+# contributor to download five std libraries on first `cargo build`.

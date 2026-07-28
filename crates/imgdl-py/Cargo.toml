@@ -1,0 +1,48 @@
+[package]
+name = "imgdl-py"
+description = "PyO3 bindings for imgdl-core. Not published to crates.io; ships as the `imgdl` wheel."
+publish = false
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+
+[lib]
+# Must match the suffix of `tool.maturin.module-name` in pyproject.toml
+# (`imgdl._imgdl`). The leading underscore marks it private: everything the
+# user touches goes through `python/imgdl/__init__.py`.
+name = "_imgdl"
+# `rlib` is what lets `cargo test`, `cargo nextest` and doctests see this crate
+# at all. Dropping it silently disables every Rust-side binding test.
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+imgdl-core = { workspace = true }
+pyo3 = { workspace = true, features = ["abi3-py310"] }
+pyo3-stub-gen = { workspace = true }
+tokio = { version = "1", features = ["rt-multi-thread", "signal"] }
+tracing = { workspace = true }
+
+[build-dependencies]
+pyo3-build-config = { workspace = true }
+
+[dev-dependencies]
+pyo3 = { workspace = true, features = ["auto-initialize"] }
+
+[features]
+# IMPORTANT: `pyo3/extension-module` must stay OFF by default.
+#
+# With it always on, the crate does not link libpython, so `cargo test`,
+# `cargo nextest` and `cargo llvm-cov` all fail with undefined Python symbols.
+# maturin turns it on via `tool.maturin.features`; nothing else should.
+extension-module = ["pyo3/extension-module"]
+
+[[bin]]
+name = "stub_gen"
+path = "src/bin/stub_gen.rs"
+
+[lints]
+workspace = true
