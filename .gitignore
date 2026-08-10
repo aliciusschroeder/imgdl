@@ -1,0 +1,34 @@
+# Rust
+/target/
+**/*.rs.bk
+
+# Python
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+dist/
+*.egg-info/
+
+# Build outputs that must never be committed.
+# The old repo vendored an unzipped wheel (.so/.pyd) into git so that a uv
+# workspace could depend on it. That is what these lines exist to prevent.
+*.whl
+*.so
+*.pyd
+*.dylib
+/release/
+/wheels/
+
+# Editors / OS
+.idea/
+.DS_Store
+*.swp
+
+# Local overrides
+.env
+.envrc.local

@@ -1,0 +1,12 @@
+* text=auto eol=lf
+
+# Generated — collapse in review, but still diffed by `just stubs-check`.
+python/imgdl/_imgdl.pyi linguist-generated=true
+Cargo.lock             linguist-generated=true
+uv.lock                linguist-generated=true -diff
+
+# Never let a wheel or shared object into the repo again.
+*.whl  binary
+*.so   binary
+*.pyd  binary
+*.dylib binary
