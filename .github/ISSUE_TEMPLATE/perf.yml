@@ -1,0 +1,19 @@
+name: Performance regression
+description: Downloads got slower, or throughput is below expectations.
+labels: [performance]
+body:
+  - type: checkboxes
+    id: release-build
+    attributes:
+      label: Sanity checks
+      options:
+        - label: I measured a release build (`just build-release`, or an installed wheel) — not a debug `maturin develop` build.
+          required: true
+        - label: The runtime was configured on the first call in the process (settings are first-call-wins).
+          required: true
+  - type: textarea
+    id: numbers
+    attributes:
+      label: Numbers
+      description: URLs, hosts, sizes, wall clock, and the Config used. Before/after if you have both.
+    validations: { required: true }

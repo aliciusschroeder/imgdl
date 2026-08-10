@@ -1,0 +1,32 @@
+name: Bug report
+description: Something behaves differently from what the docs say.
+labels: [bug]
+body:
+  - type: input
+    id: version
+    attributes:
+      label: imgdl version
+      description: "`python -c 'import imgdl; print(imgdl.__version__)'`"
+    validations: { required: true }
+  - type: dropdown
+    id: install
+    attributes:
+      label: How did you install it?
+      options: ["uv add git+", "PyPI wheel", "GitHub Release wheel", "built from a clone"]
+    validations: { required: true }
+  - type: textarea
+    id: repro
+    attributes:
+      label: Reproduction
+      description: Smallest script that shows the problem, plus the Config you used.
+      render: python
+    validations: { required: true }
+  - type: textarea
+    id: expected
+    attributes:
+      label: What you expected, and what happened instead
+    validations: { required: true }
+  - type: input
+    id: platform
+    attributes:
+      label: OS and Python version
