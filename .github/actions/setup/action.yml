@@ -1,0 +1,58 @@
+name: Set up imgdl toolchain
+description: >-
+  Rust + uv + a warm cargo cache.
+
+inputs:
+  python-version:
+    description: Python version for the uv-managed venv.
+    required: false
+    default: "3.12"
+  cache-key:
+    description: Extra cargo cache discriminator (e.g. the job name).
+    required: false
+    default: ""
+  tools:
+    description: Comma-separated cargo tools to install via taiki-e/install-action.
+    required: false
+    default: ""
+  components:
+    description: Extra rustup components (comma-separated).
+    required: false
+    default: ""
+  targets:
+    description: Extra rustup targets (comma-separated).
+    required: false
+    default: ""
+
+runs:
+  using: composite
+  steps:
+    # dtolnay/rust-toolchain guarantees rustup exists; rust-toolchain.toml then
+    # overrides the channel. That override is intentional — the pinned version
+    # is the contract, the action is just the installer.
+    - uses: dtolnay/rust-toolchain@stable
+      with:
+        components: ${{ inputs.components }}
+        targets: ${{ inputs.targets }}
+
+    - uses: Swatinem/rust-cache@v2
+      with:
+        key: ${{ inputs.cache-key }}
+        # Cache across jobs that share a dependency graph but differ in features.
+        shared-key: imgdl
+
+    - uses: astral-sh/setup-uv@v7
+      with:
+        enable-cache: true
+        python-version: ${{ inputs.python-version }}
+        cache-dependency-glob: |
+          uv.lock
+          pyproject.toml
+
+    - if: inputs.tools != ''
+      uses: taiki-e/install-action@v2
+      with:
+        tool: ${{ inputs.tools }}
+
+    - shell: bash
+      run: echo "CARGO_TERM_COLOR=always" >> "$GITHUB_ENV"
