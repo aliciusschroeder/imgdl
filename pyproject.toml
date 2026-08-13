@@ -1,3 +1,19 @@
+# ---------------------------------------------------------------------------
+# This file lives at the repo ROOT on purpose.
+#
+# It is what makes the headline install path work with no fragment:
+#
+#     uv add git+https://github.com/aliciusschroeder/imgdl
+#
+# If it lived under crates/imgdl-py/, every consumer would need
+# `#subdirectory=crates/imgdl-py` and maturin's sdist generation for a
+# workspace member gets noticeably fussier. `manifest-path` below points
+# maturin at the binding crate instead.
+# ---------------------------------------------------------------------------
+[build-system]
+requires = ["maturin>=1.9,<2.0"]
+build-backend = "maturin"
+
 [project]
 name = "imgdl"
 readme = "README.md"
@@ -5,8 +21,32 @@ license = "MIT"
 requires-python = ">=3.10"
 dependencies = []
 
+[project.scripts]
+imgdl = "imgdl.__main__:main"
+[tool.maturin]
+manifest-path = "crates/imgdl-py/Cargo.toml"
+module-name = "imgdl._imgdl"
+python-source = "python"                     # mandatory for the mixed layout; without it
+# the .pyi and py.typed never ship
+features = [
+    "pyo3/extension-module",
+] # ONLY enabled here — see imgdl-py/Cargo.toml
+strip = true
+include = [{ path = "python/imgdl/_imgdl.pyi", format = "wheel" }]
+
 # --------------------------------------------------------------------------
 # Dev environment
 # --------------------------------------------------------------------------
 [dependency-groups]
-dev = []
+[tool.uv]
+# Without this, uv happily serves a stale compiled extension after you edit
+# Rust: `uv sync` sees an unchanged pyproject.toml and skips the rebuild.
+cache-keys = [
+    { file = "pyproject.toml" },
+    { file = "Cargo.lock" },
+    { file = "**/Cargo.toml" },
+    { file = "**/*.rs" },
+]
+# The project builds itself from Rust; keep it installed editable-ish so the
+# `python/` sources are picked up without a reinstall.
+default-groups = ["dev"]
