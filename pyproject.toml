@@ -16,13 +16,32 @@ build-backend = "maturin"
 
 [project]
 name = "imgdl"
+description = "Fast concurrent image downloader: HTTP/2 multiplexing, connection pooling and DNS caching, in Rust."
 readme = "README.md"
 license = "MIT"
 requires-python = ">=3.10"
+dynamic = ["version"] # maturin reads it from Cargo.toml
+authors = [{ name = "Alicius Schröder" }]
+keywords = ["download", "images", "http2", "concurrent", "rust"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Rust",
+    "Topic :: Internet :: WWW/HTTP",
+    "Typing :: Typed",
+]
 dependencies = []
 
 [project.scripts]
 imgdl = "imgdl.__main__:main"
+
+[project.urls]
+Homepage = "https://github.com/aliciusschroeder/imgdl"
+Repository = "https://github.com/aliciusschroeder/imgdl"
+Changelog = "https://github.com/aliciusschroeder/imgdl/blob/main/CHANGELOG.md"
+Issues = "https://github.com/aliciusschroeder/imgdl/issues"
+
 [tool.maturin]
 manifest-path = "crates/imgdl-py/Cargo.toml"
 module-name = "imgdl._imgdl"
