@@ -1,0 +1,52 @@
+# `just hooks` installs these. They are the same checks CI runs, minus the
+# slow ones, so a red CI after a green commit should be rare.
+default_install_hook_types: [pre-commit, commit-msg]
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v5.0.0
+    hooks:
+      - id: trailing-whitespace
+      - id: end-of-file-fixer
+      - id: check-yaml
+      - id: check-toml
+      - id: check-merge-conflict
+      - id: check-added-large-files
+        args: [--maxkb=512]
+      - id: mixed-line-ending
+        args: [--fix=lf]
+
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.14.0
+    hooks:
+      - id: ruff-check
+        args: [--fix]
+      - id: ruff-format
+
+  - repo: local
+    hooks:
+      - id: cargo-fmt
+        name: cargo fmt
+        entry: cargo fmt --all --
+        language: system
+        types: [rust]
+        pass_filenames: false
+
+      - id: cargo-clippy
+        name: cargo clippy
+        entry: cargo clippy --workspace --all-targets --all-features -- -D warnings
+        language: system
+        types: [rust]
+        pass_filenames: false
+
+      - id: stub-drift
+        name: type stubs up to date
+        entry: just stubs-check
+        language: system
+        files: ^crates/imgdl-py/
+        pass_filenames: false
+
+      - id: no-binary-artifacts
+        name: no wheels or shared objects in git
+        entry: bash -c 'printf "refusing to commit build artifacts -- %s\n" "$@"; exit 1' --
+        language: system
+        files: '\.(whl|so|pyd|dylib)$'

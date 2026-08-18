@@ -1,0 +1,40 @@
+# Two flags, because the two numbers answer different questions:
+#   rust        — what the Rust test suite covers
+#   python-api  — which Rust paths the PYTHON API actually reaches
+coverage:
+  range: "70...95"
+  status:
+    project:
+      default:
+        target: auto
+        threshold: 1%
+      rust:
+        flags: [rust]
+        target: auto
+        threshold: 1%
+      python-api:
+        flags: [python-api]
+        # This one is informational: a low number means the Python surface is
+        # narrower than the engine, which is expected and fine.
+        informational: true
+    patch:
+      default:
+        target: 80%
+        threshold: 5%
+
+flag_management:
+  individual_flags:
+    - name: rust
+      carryforward: true
+    - name: python-api
+      carryforward: true
+
+ignore:
+  - "crates/imgdl-py/src/bin/**"
+  - "crates/imgdl-py/build.rs"
+  - "benches/**"
+  - "examples/**"
+
+comment:
+  layout: "condensed_header, flags, files"
+  require_changes: true
