@@ -1,0 +1,192 @@
+name: Release
+
+# Cutting a release is one command: `just bump 0.3.0 && git commit && just tag && git push --tags`.
+# Everything below is what happens after the tag lands.
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      dry-run:
+        description: Build wheels but publish nothing.
+        type: boolean
+        default: true
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # The tag and the workspace version must agree, or the wheels are mislabelled.
+  # Checking it here costs 20 seconds and saves a yanked release.
+  guard:
+    name: Tag matches Cargo version
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.check.outputs.version }}
+    steps:
+      - uses: actions/checkout@v6
+      - id: check
+        run: |
+          set -euo pipefail
+          cargo_version=$(python3 -c "import tomllib;print(tomllib.load(open('Cargo.toml','rb'))['workspace']['package']['version'])")
+          echo "version=$cargo_version" >> "$GITHUB_OUTPUT"
+          if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
+            tag_version="${GITHUB_REF_NAME#v}"
+            if [ "$tag_version" != "$cargo_version" ]; then
+              echo "::error::tag $GITHUB_REF_NAME does not match workspace version $cargo_version" >&2
+              exit 1
+            fi
+          fi
+          echo "releasing $cargo_version"
+
+  # abi3-py310 means ONE wheel per platform instead of one per platform x
+  # Python version — the matrix below is ~5x smaller than it would otherwise be.
+  wheels:
+    name: ${{ matrix.platform.target }} (${{ matrix.platform.runner }})
+    needs: guard
+    runs-on: ${{ matrix.platform.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        platform:
+          - {
+              runner: ubuntu-latest,
+              target: x86_64-unknown-linux-gnu,
+              manylinux: auto,
+            }
+          - {
+              runner: ubuntu-24.04-arm,
+              target: aarch64-unknown-linux-gnu,
+              manylinux: auto,
+            }
+          - {
+              runner: ubuntu-latest,
+              target: x86_64-unknown-linux-musl,
+              manylinux: musllinux_1_2,
+            }
+          - {
+              runner: ubuntu-24.04-arm,
+              target: aarch64-unknown-linux-musl,
+              manylinux: musllinux_1_2,
+            }
+          - {
+              runner: macos-latest,
+              target: aarch64-apple-darwin,
+              manylinux: "",
+            }
+          - { runner: macos-13, target: x86_64-apple-darwin, manylinux: "" }
+          - {
+              runner: windows-latest,
+              target: x86_64-pc-windows-msvc,
+              manylinux: "",
+            }
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: PyO3/maturin-action@v1
+        with:
+          target: ${{ matrix.platform.target }}
+          args: --release --out dist
+          manylinux: ${{ matrix.platform.manylinux }}
+          sccache: "true"
+
+      # An abi3 wheel that imports on the build machine is the minimum bar.
+      # Cross-compiled legs skip it (nothing can run them here).
+      - name: Smoke-test the wheel
+        # musl wheels are built inside an Alpine container; they cannot be
+        # installed on the glibc host that runs this step.
+        if: ${{ !contains(matrix.platform.target, 'musl') }}
+        shell: bash
+        run: |
+          python3 -m pip install --find-links dist --no-index --force-reinstall imgdl
+          python3 -c "import imgdl; print(imgdl.__version__); assert callable(imgdl.download_images)"
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: wheels-${{ matrix.platform.target }}
+          path: dist/*.whl
+          if-no-files-found: error
+
+  sdist:
+    name: sdist
+    needs: guard
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: PyO3/maturin-action@v1
+        with:
+          command: sdist
+          args: --out dist
+      # The sdist is what `uv add git+` effectively consumes, so prove it builds
+      # from scratch before anyone depends on it.
+      - uses: astral-sh/setup-uv@v7
+        with:
+          python-version: "3.12"
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Build the sdist in a clean environment
+        run: |
+          set -euo pipefail
+          uv venv /tmp/sdist-check
+          VIRTUAL_ENV=/tmp/sdist-check uv pip install dist/*.tar.gz
+          VIRTUAL_ENV=/tmp/sdist-check uv run python -c "import imgdl; print(imgdl.__version__)"
+      - uses: actions/upload-artifact@v7
+        with:
+          name: wheels-sdist
+          path: dist/*.tar.gz
+          if-no-files-found: error
+
+  github-release:
+    name: GitHub Release
+    needs: [guard, wheels, sdist]
+    if: github.ref_type == 'tag'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: wheels-*
+          merge-multiple: true
+          path: dist
+      - run: ls -lh dist
+      # Wheels attached to the Release are what lets a consumer with no Rust
+      # toolchain install a pinned build straight from GitHub:
+      #   uv add https://github.com/aliciusschroeder/imgdl/releases/download/vX/imgdl-...whl
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          generate_release_notes: true
+          draft: false
+          fail_on_unmatched_files: true
+
+  # pypi:
+  #   name: Publish to PyPI
+  #   needs: [guard, wheels, sdist]
+  #   if: github.ref_type == 'tag'
+  #   runs-on: ubuntu-latest
+  #   environment:
+  #     name: pypi
+  #     url: https://pypi.org/p/imgdl
+  #   permissions:
+  #     # Trusted publishing: OIDC token instead of a long-lived API token.
+  #     # TODO: Configure the publisher once at https://pypi.org/manage/account/publishing/
+  #     # (owner, repo, workflow "release.yml", environment "pypi").
+  #     id-token: write
+  #   steps:
+  #     - uses: actions/download-artifact@v8
+  #       with:
+  #         pattern: wheels-*
+  #         merge-multiple: true
+  #         path: dist
+  #     - uses: pypa/gh-action-pypi-publish@release/v1
+  #       with:
+  #         packages-dir: dist
+  #         attestations: true

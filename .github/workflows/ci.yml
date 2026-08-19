@@ -1,0 +1,239 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+    tags-ignore: ["**"]        # tags are handled by release.yml
+  pull_request:
+  merge_group:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  # ---------------------------------------------------------------------
+  # Fast feedback: anything that fails here fails in under two minutes.
+  # ---------------------------------------------------------------------
+  lint:
+    name: Lint & format
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: ./.github/actions/setup
+        with:
+          cache-key: lint
+          components: rustfmt,clippy
+      - run: cargo fmt --all --check
+      - run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+      # --no-install-project: uv would otherwise build a fat-LTO release wheel
+      # here, which this job never uses. Same reason as in the justfile.
+      - run: uv sync --no-install-project
+      - run: uv run --no-sync ruff check --output-format=github .
+      - run: uv run --no-sync ruff format --check .
+
+  # The generated type stub is committed so editors and type checkers work
+  # without a Rust build. This job is what stops it from silently rotting.
+  stubs:
+    name: Type stubs up to date
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: ./.github/actions/setup
+        with:
+          cache-key: stubs
+          tools: just
+      - run: uv sync --no-install-project
+      # Same recipe developers run locally, so the two can't drift.
+      - run: just stubs-check
+      - name: Type-check the Python layer against the stub
+        run: |
+          uv run --no-sync maturin develop --uv
+          uv run --no-sync mypy
+
+  # ---------------------------------------------------------------------
+  # Rust
+  # ---------------------------------------------------------------------
+  rust-tests:
+    name: Rust tests (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v6
+      - uses: ./.github/actions/setup
+        with:
+          cache-key: rust-${{ matrix.os }}
+          tools: cargo-nextest
+      # No LD_LIBRARY_PATH export anywhere: crates/imgdl-py/build.rs bakes the
+      # libpython rpath in. If this step ever fails to load libpython, that is
+      # the file to fix — do not paper over it with env vars here.
+      - run: cargo nextest run --workspace --all-targets
+
+  msrv:
+    name: MSRV (rust-version in Cargo.toml)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: astral-sh/setup-uv@v7
+        with:
+          python-version: "3.12"
+      - id: msrv
+        run: |
+          v=$(grep -m1 '^rust-version' Cargo.toml | cut -d'"' -f2)
+          echo "version=$v" >> "$GITHUB_OUTPUT"
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ steps.msrv.outputs.version }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: msrv
+      # rust-toolchain.toml would override the MSRV toolchain we just installed.
+      - run: rm rust-toolchain.toml
+      - run: cargo check --workspace --all-targets --locked
+
+  # ---------------------------------------------------------------------
+  # Python
+  # ---------------------------------------------------------------------
+  python-tests:
+    name: pytest (${{ matrix.os }}, py${{ matrix.python }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+        python: ["3.10", "3.13"]     # abi3 floor and current; the middle is covered by the wheel matrix
+    steps:
+      - uses: actions/checkout@v6
+      - uses: ./.github/actions/setup
+        with:
+          cache-key: py-${{ matrix.os }}
+          python-version: ${{ matrix.python }}
+      - run: uv sync --no-install-project
+      - run: uv run --no-sync maturin develop --uv
+      - run: uv run --no-sync pytest -m "not network" --durations=10
+
+  # ---------------------------------------------------------------------
+  # Coverage — two flavours, uploaded under separate flags.
+  #   rust:   what the Rust test suite exercises
+  #   python: which Rust paths the PYTHON API actually reaches
+  # ---------------------------------------------------------------------
+  coverage:
+    name: Coverage
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: ./.github/actions/setup
+        with:
+          cache-key: coverage
+          components: llvm-tools-preview
+          tools: cargo-nextest,cargo-llvm-cov
+      - run: uv sync --no-install-project
+
+      - name: Rust coverage (Rust tests)
+        run: cargo llvm-cov nextest --workspace --lcov --output-path lcov-rust.info
+
+      - name: Rust coverage (through the Python test suite)
+        run: |
+          # `show-env` must be sourced BEFORE maturin builds, so the .so pytest
+          # imports is the instrumented one. Cleaning after this point would
+          # throw away exactly the profile data we want.
+          source <(cargo llvm-cov show-env --export-prefix)
+          cargo llvm-cov clean --workspace
+          uv run --no-sync maturin develop --uv
+          uv run --no-sync pytest -m "not network"
+          cargo llvm-cov report --lcov --output-path lcov-python.info
+
+      - uses: codecov/codecov-action@v6
+        with:
+          files: lcov-rust.info
+          flags: rust
+          token: ${{ secrets.CODECOV_TOKEN }}
+      - uses: codecov/codecov-action@v6
+        with:
+          files: lcov-python.info
+          flags: python-api
+          token: ${{ secrets.CODECOV_TOKEN }}
+
+  # ---------------------------------------------------------------------
+  # The headline install path, tested on every PR.
+  #
+  # This job is the whole point of putting pyproject.toml at the repo root.
+  # If it goes red, `uv add git+https://github.com/aliciusschroeder/imgdl` is broken for
+  # every consumer — which is exactly the failure that used to be found by a
+  # downstream team, days later.
+  # ---------------------------------------------------------------------
+  install-smoke:
+    # Linux + macOS only: `git+file://` URLs on Windows need drive-letter
+    # mangling that tests the shell, not the package. Windows consumers are
+    # covered by the wheel matrix in release.yml.
+    name: uv add git+ (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0      # uv needs real git history to resolve a rev
+      - uses: ./.github/actions/setup
+        with:
+          cache-key: smoke-${{ matrix.os }}
+      - name: Install from a bare git URL into a clean project
+        shell: bash
+        run: |
+          set -euo pipefail
+          repo="$(pwd)"
+          cd "$(mktemp -d)"
+          uv init --bare --name smoke
+          # No `#subdirectory=` fragment. That is the whole point of keeping
+          # pyproject.toml at the repo root.
+          uv add "git+file://${repo}"
+          uv run python -c "
+          import imgdl
+          print('imgdl', imgdl.__version__)
+          assert callable(imgdl.download_images)
+          assert imgdl.Config().max_concurrent > 0
+          assert imgdl.__all__
+          "
+          # The console script, from the same build — re-resolving from git here
+          # would pay the full compile again for no extra signal.
+          uv run imgdl --version
+
+  # ---------------------------------------------------------------------
+  # Supply chain
+  # ---------------------------------------------------------------------
+  audit:
+    name: Licences & advisories
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: ./.github/actions/setup
+        with:
+          cache-key: audit
+          tools: cargo-deny
+      - run: cargo deny check
+
+  # Single required status check — branch protection points at this one job,
+  # so adding or renaming a matrix leg never means editing repo settings.
+  ci-ok:
+    name: CI
+    if: always()
+    needs: [lint, stubs, rust-tests, msrv, python-tests, coverage, install-smoke, audit]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Fail if any dependency failed
+        run: |
+          echo '${{ toJSON(needs) }}' \
+            | python3 -c "import json,sys; r=json.load(sys.stdin); bad=[k for k,v in r.items() if v['result'] not in ('success','skipped')]; print('failed:', bad or 'none'); sys.exit(1 if bad else 0)"
