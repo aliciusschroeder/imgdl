@@ -92,3 +92,308 @@ where
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use bytes::Bytes;
+    use http::HeaderMap;
+    use std::sync::atomic::{AtomicU32, Ordering};
+    use std::sync::Arc;
+    use std::time::Instant;
+
+    use crate::transport::ResponseData;
+
+    fn ok_response() -> ResponseData {
+        ResponseData {
+            bytes: Bytes::from_static(b"ok"),
+            headers: HeaderMap::new(),
+            elapsed: Duration::from_millis(10),
+        }
+    }
+
+    #[tokio::test]
+    async fn returns_immediately_on_success() {
+        let count = Arc::new(AtomicU32::new(0));
+        let c = count.clone();
+
+        let (result, retries) = with_retry(3, Duration::from_millis(10), || {
+            let c = c.clone();
+            async move {
+                c.fetch_add(1, Ordering::SeqCst);
+                Ok(ok_response())
+            }
+        })
+        .await;
+
+        assert!(result.is_ok());
+        assert_eq!(retries, 0);
+        assert_eq!(count.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn retries_on_429() {
+        let count = Arc::new(AtomicU32::new(0));
+        let c = count.clone();
+
+        let (result, retries) = with_retry(3, Duration::from_millis(10), || {
+            let c = c.clone();
+            async move {
+                let n = c.fetch_add(1, Ordering::SeqCst);
+                if n < 2 {
+                    Err(DownloadError::HttpStatus {
+                        code: 429,
+                        message: "Too Many Requests".into(),
+                        retry_after: None,
+                    })
+                } else {
+                    Ok(ok_response())
+                }
+            }
+        })
+        .await;
+
+        assert!(result.is_ok());
+        assert_eq!(retries, 2);
+        assert_eq!(count.load(Ordering::SeqCst), 3);
+    }
+
+    #[tokio::test]
+    async fn retries_on_503() {
+        let count = Arc::new(AtomicU32::new(0));
+        let c = count.clone();
+
+        let (result, retries) = with_retry(3, Duration::from_millis(10), || {
+            let c = c.clone();
+            async move {
+                let n = c.fetch_add(1, Ordering::SeqCst);
+                if n < 1 {
+                    Err(DownloadError::HttpStatus {
+                        code: 503,
+                        message: "Service Unavailable".into(),
+                        retry_after: None,
+                    })
+                } else {
+                    Ok(ok_response())
+                }
+            }
+        })
+        .await;
+
+        assert!(result.is_ok());
+        assert_eq!(retries, 1);
+        assert_eq!(count.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn retries_on_timeout() {
+        let count = Arc::new(AtomicU32::new(0));
+        let c = count.clone();
+
+        let (result, retries) = with_retry(3, Duration::from_millis(10), || {
+            let c = c.clone();
+            async move {
+                let n = c.fetch_add(1, Ordering::SeqCst);
+                if n < 1 {
+                    Err(DownloadError::Timeout)
+                } else {
+                    Ok(ok_response())
+                }
+            }
+        })
+        .await;
+
+        assert!(result.is_ok());
+        assert_eq!(retries, 1);
+    }
+
+    #[tokio::test]
+    async fn retries_on_connection_failed() {
+        let count = Arc::new(AtomicU32::new(0));
+        let c = count.clone();
+
+        let (result, retries) = with_retry(3, Duration::from_millis(10), || {
+            let c = c.clone();
+            async move {
+                let n = c.fetch_add(1, Ordering::SeqCst);
+                if n < 1 {
+                    Err(DownloadError::ConnectionFailed("reset".into()))
+                } else {
+                    Ok(ok_response())
+                }
+            }
+        })
+        .await;
+
+        assert!(result.is_ok());
+        assert_eq!(retries, 1);
+    }
+
+    #[tokio::test]
+    async fn does_not_retry_on_404() {
+        let count = Arc::new(AtomicU32::new(0));
+        let c = count.clone();
+
+        let (result, retries) =
+            with_retry::<ResponseData, _, _>(3, Duration::from_millis(10), || {
+                let c = c.clone();
+                async move {
+                    c.fetch_add(1, Ordering::SeqCst);
+                    Err(DownloadError::HttpStatus {
+                        code: 404,
+                        message: "Not Found".into(),
+                        retry_after: None,
+                    })
+                }
+            })
+            .await;
+
+        assert!(result.is_err());
+        assert_eq!(retries, 0);
+        assert_eq!(count.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn does_not_retry_on_tls_error() {
+        let count = Arc::new(AtomicU32::new(0));
+        let c = count.clone();
+
+        let (result, retries) =
+            with_retry::<ResponseData, _, _>(3, Duration::from_millis(10), || {
+                let c = c.clone();
+                async move {
+                    c.fetch_add(1, Ordering::SeqCst);
+                    Err(DownloadError::TlsError("bad cert".into()))
+                }
+            })
+            .await;
+
+        assert!(result.is_err());
+        assert_eq!(retries, 0);
+        assert_eq!(count.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn does_not_retry_on_dns_failed() {
+        let count = Arc::new(AtomicU32::new(0));
+        let c = count.clone();
+
+        let (result, retries) =
+            with_retry::<ResponseData, _, _>(3, Duration::from_millis(10), || {
+                let c = c.clone();
+                async move {
+                    c.fetch_add(1, Ordering::SeqCst);
+                    Err(DownloadError::DnsResolutionFailed("NXDOMAIN".into()))
+                }
+            })
+            .await;
+
+        assert!(result.is_err());
+        assert_eq!(retries, 0);
+        assert_eq!(count.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn respects_retry_after_header() {
+        let count = Arc::new(AtomicU32::new(0));
+        let c = count.clone();
+        let start = Instant::now();
+
+        let (result, _) = with_retry(3, Duration::from_millis(10), || {
+            let c = c.clone();
+            async move {
+                let n = c.fetch_add(1, Ordering::SeqCst);
+                if n < 1 {
+                    Err(DownloadError::HttpStatus {
+                        code: 429,
+                        message: "rate limited".into(),
+                        retry_after: Some(Duration::from_millis(50)),
+                    })
+                } else {
+                    Ok(ok_response())
+                }
+            }
+        })
+        .await;
+
+        assert!(result.is_ok());
+        // Should have waited at least 50ms for Retry-After
+        assert!(start.elapsed() >= Duration::from_millis(40)); // small tolerance
+    }
+
+    #[tokio::test]
+    async fn backoff_increases_exponentially() {
+        let timestamps = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+        let ts = timestamps.clone();
+
+        let (_, _) = with_retry::<ResponseData, _, _>(3, Duration::from_millis(20), || {
+            let ts = ts.clone();
+            async move {
+                ts.lock().await.push(Instant::now());
+                Err(DownloadError::Timeout)
+            }
+        })
+        .await;
+
+        let ts = timestamps.lock().await;
+        assert_eq!(ts.len(), 4); // 1 initial + 3 retries
+
+        // Verify base exponential component: 20ms, 40ms, 80ms
+        // With jitter (0..50%), ranges are: 20-30ms, 40-60ms, 80-120ms
+        // Second base (40ms) is always > first max (30ms), so this holds
+        let delay1 = ts[1].duration_since(ts[0]);
+        let delay2 = ts[2].duration_since(ts[1]);
+        assert!(
+            delay2 > delay1,
+            "second delay ({delay2:?}) should be greater than first ({delay1:?})"
+        );
+    }
+
+    #[tokio::test]
+    async fn returns_last_error_after_exhausting_retries() {
+        let count = Arc::new(AtomicU32::new(0));
+        let c = count.clone();
+
+        let (result, retries) =
+            with_retry::<ResponseData, _, _>(2, Duration::from_millis(10), || {
+                let c = c.clone();
+                async move {
+                    c.fetch_add(1, Ordering::SeqCst);
+                    Err(DownloadError::Timeout)
+                }
+            })
+            .await;
+
+        assert!(matches!(result, Err(DownloadError::Timeout)));
+        assert_eq!(retries, 2);
+        assert_eq!(count.load(Ordering::SeqCst), 3); // 1 initial + 2 retries
+    }
+
+    #[tokio::test]
+    async fn retries_attempted_count_is_correct() {
+        let count = Arc::new(AtomicU32::new(0));
+        let c = count.clone();
+
+        let (result, retries) =
+            with_retry::<ResponseData, _, _>(2, Duration::from_millis(10), || {
+                let c = c.clone();
+                async move {
+                    c.fetch_add(1, Ordering::SeqCst);
+                    Err(DownloadError::HttpStatus {
+                        code: 503,
+                        message: "Service Unavailable".into(),
+                        retry_after: None,
+                    })
+                }
+            })
+            .await;
+
+        assert!(result.is_err());
+        assert_eq!(retries, 2, "should report 2 retries attempted");
+        assert_eq!(
+            count.load(Ordering::SeqCst),
+            3,
+            "should call operation 3 times total"
+        );
+    }
+}
