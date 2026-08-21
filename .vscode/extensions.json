@@ -1,0 +1,10 @@
+{
+  "recommendations": [
+    "rust-lang.rust-analyzer",
+    "charliermarsh.ruff",
+    "ms-python.python",
+    "tamasfe.even-better-toml",
+    "ryanluker.vscode-coverage-gutters",
+    "nefrob.vscode-just-syntax"
+  ]
+}

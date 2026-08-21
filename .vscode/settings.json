@@ -1,0 +1,26 @@
+{
+  // Deliberately free of machine-specific paths. Everything here works on a
+  // fresh clone after `just`.
+  "python.defaultInterpreterPath": "${workspaceFolder}/.venv/bin/python",
+  "python.testing.pytestEnabled": true,
+  "python.testing.unittestEnabled": false,
+  "python.testing.pytestArgs": ["tests"],
+
+  // No LD_LIBRARY_PATH here: crates/imgdl-py/build.rs bakes the libpython rpath
+  // into test binaries, so rust-analyzer's test runner just works.
+  "rust-analyzer.cargo.features": "all",
+  "rust-analyzer.check.command": "clippy",
+  "rust-analyzer.check.allTargets": true,
+  "rust-analyzer.testExplorer": true,
+
+  "coverage-gutters.coverageFileNames": ["target/lcov-rust.info", "target/lcov-py.info"],
+  "coverage-gutters.showGutterCoverage": true,
+  "coverage-gutters.showLineCoverage": true,
+
+  "[rust]": { "editor.defaultFormatter": "rust-lang.rust-analyzer", "editor.formatOnSave": true },
+  "[python]": { "editor.defaultFormatter": "charliermarsh.ruff", "editor.formatOnSave": true },
+  "[toml]": { "editor.defaultFormatter": "tamasfe.even-better-toml" },
+
+  "files.watcherExclude": { "**/target/**": true, "**/.venv/**": true },
+  "search.exclude": { "**/target": true, "**/.venv": true, "docs/planning": true }
+}
