@@ -545,3 +545,409 @@ impl Downloader {
         Downloader { pool, config }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::Duration;
+    use tempfile::TempDir;
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    fn plain_downloader(config: Config) -> Downloader {
+        Downloader::new_plain(config)
+    }
+
+    #[test]
+    fn new_creates_valid_instance() {
+        let _dl = Downloader::new(Config::default());
+    }
+
+    #[tokio::test]
+    async fn empty_urls_returns_empty_vec() {
+        let dl = plain_downloader(Config::default());
+        let dir = TempDir::new().unwrap();
+        let results = dl.download_batch(&[], dir.path()).await;
+        assert!(results.is_empty());
+    }
+
+    #[tokio::test]
+    async fn creates_output_directory_if_missing() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/image.jpg"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_bytes(vec![0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x10]),
+            )
+            .mount(&server)
+            .await;
+
+        let dl = plain_downloader(Config::default());
+        let dir = TempDir::new().unwrap();
+        let sub = dir.path().join("nested").join("subdir");
+        let url = format!("{}/image.jpg", server.uri());
+        let results = dl.download_batch(&[&url], &sub).await;
+
+        assert_eq!(results.len(), 1);
+        assert!(sub.exists());
+        assert!(matches!(
+            results[0].outcome,
+            DownloadOutcome::Success { .. }
+        ));
+    }
+
+    #[tokio::test]
+    async fn downloads_single_url_to_disk() {
+        let server = MockServer::start().await;
+        let body = vec![0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x10, 0x4A, 0x46];
+        Mock::given(method("GET"))
+            .and(path("/photo.jpg"))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(body.clone()))
+            .mount(&server)
+            .await;
+
+        let dl = plain_downloader(Config::default());
+        let dir = TempDir::new().unwrap();
+        let url = format!("{}/photo.jpg", server.uri());
+        let results = dl.download_batch(&[&url], dir.path()).await;
+
+        assert_eq!(results.len(), 1);
+        match &results[0].outcome {
+            DownloadOutcome::Success {
+                path, size_bytes, ..
+            } => {
+                assert_eq!(*size_bytes, body.len() as u64);
+                assert!(path.exists());
+                let content = tokio::fs::read(path).await.unwrap();
+                assert_eq!(content, body);
+            }
+            other => panic!("expected Success, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn downloads_multiple_urls() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/a.jpg"))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(b"aaa".to_vec()))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/b.jpg"))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(b"bbb".to_vec()))
+            .mount(&server)
+            .await;
+
+        let dl = plain_downloader(Config::default());
+        let dir = TempDir::new().unwrap();
+        let url_a = format!("{}/a.jpg", server.uri());
+        let url_b = format!("{}/b.jpg", server.uri());
+        let results = dl.download_batch(&[&url_a, &url_b], dir.path()).await;
+
+        assert_eq!(results.len(), 2);
+        assert!(matches!(
+            results[0].outcome,
+            DownloadOutcome::Success { .. }
+        ));
+        assert!(matches!(
+            results[1].outcome,
+            DownloadOutcome::Success { .. }
+        ));
+    }
+
+    #[tokio::test]
+    async fn returns_results_in_input_order() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/slow.jpg"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_bytes(b"slow".to_vec())
+                    .set_delay(Duration::from_millis(200)),
+            )
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/fast.jpg"))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(b"fast".to_vec()))
+            .mount(&server)
+            .await;
+
+        let dl = plain_downloader(Config::default());
+        let dir = TempDir::new().unwrap();
+        let url_slow = format!("{}/slow.jpg", server.uri());
+        let url_fast = format!("{}/fast.jpg", server.uri());
+        let results = dl.download_batch(&[&url_slow, &url_fast], dir.path()).await;
+
+        assert_eq!(results.len(), 2);
+        assert!(results[0].url.contains("slow.jpg"));
+        assert!(results[1].url.contains("fast.jpg"));
+    }
+
+    #[tokio::test]
+    async fn deduplicates_urls() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/dup.jpg"))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(b"data".to_vec()))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let dl = plain_downloader(Config::default());
+        let dir = TempDir::new().unwrap();
+        let url = format!("{}/dup.jpg", server.uri());
+        let results = dl.download_batch(&[&url, &url, &url], dir.path()).await;
+
+        assert_eq!(results.len(), 3);
+        for r in &results {
+            assert!(
+                matches!(r.outcome, DownloadOutcome::Success { .. }),
+                "expected Success, got {:?}",
+                r.outcome
+            );
+        }
+        // All should reference the same file path
+        let paths: Vec<_> = results
+            .iter()
+            .map(|r| match &r.outcome {
+                DownloadOutcome::Success { path, .. } => path.clone(),
+                _ => unreachable!(),
+            })
+            .collect();
+        assert_eq!(paths[0], paths[1]);
+        assert_eq!(paths[1], paths[2]);
+    }
+
+    #[tokio::test]
+    async fn dedup_sequential_naming_uses_first_index() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/a.jpg"))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(b"aaa".to_vec()))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/b.jpg"))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(b"bbb".to_vec()))
+            .mount(&server)
+            .await;
+
+        let config = Config {
+            naming_strategy: NamingStrategy::Sequential,
+            ..Default::default()
+        };
+        let dl = plain_downloader(config);
+        let dir = TempDir::new().unwrap();
+        let url_a = format!("{}/a.jpg", server.uri());
+        let url_b = format!("{}/b.jpg", server.uri());
+        let results = dl
+            .download_batch(&[&url_a, &url_b, &url_a], dir.path())
+            .await;
+
+        assert_eq!(results.len(), 3);
+        // url_a gets index 0 -> 000.jpg
+        match &results[0].outcome {
+            DownloadOutcome::Success { path, .. } => {
+                let name = path.file_name().unwrap().to_str().unwrap();
+                assert!(name.starts_with("000"), "expected 000.*, got {name}");
+            }
+            other => panic!("expected Success, got {other:?}"),
+        }
+        // url_b gets index 1 -> 001.jpg
+        match &results[1].outcome {
+            DownloadOutcome::Success { path, .. } => {
+                let name = path.file_name().unwrap().to_str().unwrap();
+                assert!(name.starts_with("001"), "expected 001.*, got {name}");
+            }
+            other => panic!("expected Success, got {other:?}"),
+        }
+        // Duplicate url_a has same path as first occurrence
+        match (&results[0].outcome, &results[2].outcome) {
+            (
+                DownloadOutcome::Success { path: p0, .. },
+                DownloadOutcome::Success { path: p2, .. },
+            ) => assert_eq!(p0, p2),
+            _ => panic!("expected both Success"),
+        }
+    }
+
+    #[tokio::test]
+    async fn isolates_errors() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/good.jpg"))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(b"good".to_vec()))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/bad.jpg"))
+            .respond_with(ResponseTemplate::new(404).set_body_bytes(b"not found".to_vec()))
+            .mount(&server)
+            .await;
+
+        let dl = plain_downloader(Config::default());
+        let dir = TempDir::new().unwrap();
+        let url_good = format!("{}/good.jpg", server.uri());
+        let url_bad = format!("{}/bad.jpg", server.uri());
+        let results = dl.download_batch(&[&url_good, &url_bad], dir.path()).await;
+
+        assert_eq!(results.len(), 2);
+        assert!(matches!(
+            results[0].outcome,
+            DownloadOutcome::Success { .. }
+        ));
+        assert!(matches!(
+            results[1].outcome,
+            DownloadOutcome::Failure { .. }
+        ));
+    }
+
+    #[tokio::test]
+    async fn respects_batch_timeout() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/slow.jpg"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_bytes(b"slow".to_vec())
+                    .set_delay(Duration::from_secs(5)),
+            )
+            .mount(&server)
+            .await;
+
+        let config = Config {
+            batch_timeout: Some(Duration::from_millis(200)),
+            max_retries: 0,
+            ..Default::default()
+        };
+        let dl = plain_downloader(config);
+        let dir = TempDir::new().unwrap();
+        let url = format!("{}/slow.jpg", server.uri());
+
+        let start = Instant::now();
+        let results = dl.download_batch(&[&url], dir.path()).await;
+        let elapsed = start.elapsed();
+
+        assert_eq!(results.len(), 1);
+        match &results[0].outcome {
+            DownloadOutcome::Failure { error, .. } => {
+                assert!(
+                    matches!(error, DownloadError::Timeout),
+                    "expected Timeout error, got {error:?}"
+                );
+            }
+            other => panic!("expected Failure, got {other:?}"),
+        }
+        assert!(
+            elapsed < Duration::from_secs(2),
+            "batch should have timed out quickly, took {elapsed:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn handles_invalid_urls() {
+        let dl = plain_downloader(Config::default());
+        let dir = TempDir::new().unwrap();
+        let results = dl
+            .download_batch(&["not-a-url", "://bad"], dir.path())
+            .await;
+
+        assert_eq!(results.len(), 2);
+        assert!(matches!(
+            results[0].outcome,
+            DownloadOutcome::Failure { .. }
+        ));
+        assert!(matches!(
+            results[1].outcome,
+            DownloadOutcome::Failure { .. }
+        ));
+    }
+
+    #[tokio::test]
+    async fn handles_all_failing() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(500).set_body_bytes(b"error".to_vec()))
+            .mount(&server)
+            .await;
+
+        let config = Config {
+            max_retries: 0,
+            ..Default::default()
+        };
+        let dl = plain_downloader(config);
+        let dir = TempDir::new().unwrap();
+        let url_a = format!("{}/a.jpg", server.uri());
+        let url_b = format!("{}/b.jpg", server.uri());
+        let results = dl.download_batch(&[&url_a, &url_b], dir.path()).await;
+
+        assert_eq!(results.len(), 2);
+        for r in &results {
+            assert!(
+                matches!(r.outcome, DownloadOutcome::Failure { .. }),
+                "expected Failure, got {:?}",
+                r.outcome
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn concurrent_downloads_faster_than_sequential() {
+        let server = MockServer::start().await;
+        for i in 0..4 {
+            Mock::given(method("GET"))
+                .and(path(format!("/{i}.jpg")))
+                .respond_with(
+                    ResponseTemplate::new(200)
+                        .set_body_bytes(format!("img{i}").into_bytes())
+                        .set_delay(Duration::from_millis(100)),
+                )
+                .mount(&server)
+                .await;
+        }
+
+        let dl = plain_downloader(Config::default());
+        let dir = TempDir::new().unwrap();
+        let urls: Vec<String> = (0..4)
+            .map(|i| format!("{}/{i}.jpg", server.uri()))
+            .collect();
+        let url_refs: Vec<&str> = urls.iter().map(|s| s.as_str()).collect();
+
+        let start = Instant::now();
+        let results = dl.download_batch(&url_refs, dir.path()).await;
+        let elapsed = start.elapsed();
+
+        assert_eq!(results.len(), 4);
+        for r in &results {
+            assert!(matches!(r.outcome, DownloadOutcome::Success { .. }));
+        }
+        // Sequential = 400ms+. Concurrent should be well under that.
+        assert!(
+            elapsed < Duration::from_millis(500),
+            "expected concurrent execution, took {elapsed:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn connection_reuse_across_batches() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/reuse.jpg"))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(b"reuse".to_vec()))
+            .expect(2)
+            .mount(&server)
+            .await;
+
+        let dl = plain_downloader(Config::default());
+        let dir = TempDir::new().unwrap();
+        let url = format!("{}/reuse.jpg", server.uri());
+
+        let r1 = dl.download_batch(&[&url], dir.path()).await;
+        assert!(matches!(r1[0].outcome, DownloadOutcome::Success { .. }));
+
+        let r2 = dl.download_batch(&[&url], dir.path()).await;
+        assert!(matches!(r2[0].outcome, DownloadOutcome::Success { .. }));
+    }
+}
