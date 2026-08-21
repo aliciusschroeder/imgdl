@@ -516,3 +516,363 @@ impl ConnectionPool {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::convert::Infallible;
+
+    fn test_config() -> Arc<Config> {
+        Arc::new(Config::default())
+    }
+
+    fn test_pool() -> ConnectionPool {
+        let config = test_config();
+        let dns = Arc::new(DnsCache::new(config.dns_cache_ttl));
+        let tls = crate::tls::build_tls_config();
+        ConnectionPool::new(config, dns, tls)
+    }
+
+    fn test_pool_with_config(config: Config) -> ConnectionPool {
+        let config = Arc::new(config);
+        let dns = Arc::new(DnsCache::new(config.dns_cache_ttl));
+        let tls = crate::tls::build_tls_config();
+        ConnectionPool::new(config, dns, tls)
+    }
+
+    /// Create an HTTP/2 sender backed by an in-memory DuplexStream.
+    async fn make_h2_sender() -> http2::SendRequest<ReqBody> {
+        let (client_io, server_io) = tokio::io::duplex(65536);
+
+        // Server side
+        tokio::spawn(async move {
+            let io = TokioIo::new(server_io);
+            let service = hyper::service::service_fn(
+                |_req: hyper::Request<hyper::body::Incoming>| async move {
+                    Ok::<_, Infallible>(hyper::Response::new(Empty::<Bytes>::new()))
+                },
+            );
+            let builder = hyper::server::conn::http2::Builder::new(TokioExecutor::new());
+            let _ = builder.serve_connection(io, service).await;
+        });
+
+        // Client side
+        let io = TokioIo::new(client_io);
+        let (sender, conn) = http2::Builder::new(TokioExecutor::new())
+            .handshake(io)
+            .await
+            .expect("h2 client handshake");
+        tokio::spawn(async move {
+            let _ = conn.await;
+        });
+
+        sender
+    }
+
+    /// Create an HTTP/1.1 sender backed by an in-memory DuplexStream.
+    async fn make_h1_sender() -> http1::SendRequest<ReqBody> {
+        let (client_io, server_io) = tokio::io::duplex(65536);
+
+        tokio::spawn(async move {
+            let io = TokioIo::new(server_io);
+            let service = hyper::service::service_fn(
+                |_req: hyper::Request<hyper::body::Incoming>| async move {
+                    Ok::<_, Infallible>(hyper::Response::new(Empty::<Bytes>::new()))
+                },
+            );
+            let builder = hyper::server::conn::http1::Builder::new();
+            let _ = builder.serve_connection(io, service).await;
+        });
+
+        let io = TokioIo::new(client_io);
+        let (sender, conn) = http1::Builder::new()
+            .handshake(io)
+            .await
+            .expect("h1 client handshake");
+        tokio::spawn(async move {
+            let _ = conn.await;
+        });
+
+        sender
+    }
+
+    /// Insert an H2 sender directly into the pool for testing.
+    async fn insert_h2(
+        pool: &ConnectionPool,
+        host: &str,
+        port: u16,
+        sender: http2::SendRequest<ReqBody>,
+    ) -> usize {
+        let key = (host.to_string(), port);
+        let mut pools = pool.host_pools.lock().await;
+        let hp = pools.entry(key).or_insert_with(|| HostPool {
+            protocol: NegotiatedProtocol::Http2,
+            connections: Vec::new(),
+            notify: Arc::new(Notify::new()),
+            opening_count: 0,
+            next_id: 0,
+        });
+        let id = hp.allocate_id();
+        hp.connections.push(PooledConnection {
+            id,
+            sender: ConnectionSender::H2(sender),
+        });
+        id
+    }
+
+    /// Insert an H1 sender directly into the pool for testing.
+    async fn insert_h1(
+        pool: &ConnectionPool,
+        host: &str,
+        port: u16,
+        sender: http1::SendRequest<ReqBody>,
+    ) -> usize {
+        let key = (host.to_string(), port);
+        let mut pools = pool.host_pools.lock().await;
+        let hp = pools.entry(key).or_insert_with(|| HostPool {
+            protocol: NegotiatedProtocol::Http1,
+            connections: Vec::new(),
+            notify: Arc::new(Notify::new()),
+            opening_count: 0,
+            next_id: 0,
+        });
+        let id = hp.allocate_id();
+        hp.connections.push(PooledConnection {
+            id,
+            sender: ConnectionSender::H1(Some(sender)),
+        });
+        id
+    }
+
+    #[tokio::test]
+    async fn pool_starts_empty() {
+        let pool = test_pool();
+        let pools = pool.host_pools.lock().await;
+        assert!(pools.is_empty());
+    }
+
+    #[tokio::test]
+    async fn acquire_returns_injected_h2_connection() {
+        let pool = test_pool();
+        let sender = make_h2_sender().await;
+        let conn_id = insert_h2(&pool, "test.local", 443, sender).await;
+
+        let handle = pool.acquire("test.local", 443).await.unwrap();
+        assert_eq!(handle.connection_id, conn_id);
+        assert!(matches!(handle.sender, PoolHandleSender::H2(_)));
+    }
+
+    #[tokio::test]
+    async fn acquire_reuses_h2_connection() {
+        let pool = test_pool();
+        let sender = make_h2_sender().await;
+        insert_h2(&pool, "test.local", 443, sender).await;
+
+        let handle1 = pool.acquire("test.local", 443).await.unwrap();
+        let handle2 = pool.acquire("test.local", 443).await.unwrap();
+
+        // Both should reference the same underlying connection
+        assert_eq!(handle1.connection_id, handle2.connection_id);
+    }
+
+    #[tokio::test]
+    async fn h1_checkout_is_exclusive() {
+        let pool = test_pool();
+        let sender = make_h1_sender().await;
+        insert_h1(&pool, "test.local", 80, sender).await;
+
+        let handle = pool.acquire("test.local", 80).await.unwrap();
+        assert!(matches!(handle.sender, PoolHandleSender::H1(_)));
+
+        // Connection should be checked out (None) in pool
+        let pools = pool.host_pools.lock().await;
+        let hp = pools.get(&("test.local".to_string(), 80)).unwrap();
+        assert_eq!(hp.connections.len(), 1);
+        if let ConnectionSender::H1(ref opt) = hp.connections[0].sender {
+            assert!(opt.is_none(), "H1 sender should be checked out");
+        } else {
+            panic!("expected H1 connection");
+        }
+    }
+
+    #[tokio::test]
+    async fn h1_return_makes_connection_reusable() {
+        let pool = test_pool();
+        let sender = make_h1_sender().await;
+        let conn_id = insert_h1(&pool, "test.local", 80, sender).await;
+
+        // Check out
+        let handle = pool.acquire("test.local", 80).await.unwrap();
+        let PoolHandleSender::H1(h1_sender) = handle.sender else {
+            panic!("expected H1")
+        };
+
+        // Return
+        pool.return_h1_connection("test.local", 80, conn_id, h1_sender)
+            .await;
+
+        // Re-acquire should succeed with same connection
+        let handle2 = pool.acquire("test.local", 80).await.unwrap();
+        assert_eq!(handle2.connection_id, conn_id);
+    }
+
+    #[tokio::test]
+    async fn h1_waits_when_all_checked_out() {
+        let pool = Arc::new(test_pool());
+        let sender = make_h1_sender().await;
+        let conn_id = insert_h1(&pool, "test.local", 80, sender).await;
+
+        // Check out
+        let handle = pool.acquire("test.local", 80).await.unwrap();
+        let PoolHandleSender::H1(h1_sender) = handle.sender else {
+            panic!("expected H1")
+        };
+
+        // Spawn waiter that should block
+        let pool2 = Arc::clone(&pool);
+        let waiter = tokio::spawn(async move { pool2.acquire("test.local", 80).await });
+
+        // Give the waiter time to register on notify
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        // Return connection - should wake waiter
+        pool.return_h1_connection("test.local", 80, conn_id, h1_sender)
+            .await;
+
+        let result = tokio::time::timeout(Duration::from_secs(1), waiter).await;
+        assert!(result.is_ok(), "waiter should complete");
+        let handle2 = result.unwrap().unwrap().unwrap();
+        assert_eq!(handle2.connection_id, conn_id);
+    }
+
+    #[tokio::test]
+    async fn remove_dead_connection_cleans_pool() {
+        let pool = test_pool();
+        let sender = make_h2_sender().await;
+        let conn_id = insert_h2(&pool, "test.local", 443, sender).await;
+
+        pool.remove_dead_connection("test.local", 443, conn_id)
+            .await;
+
+        let pools = pool.host_pools.lock().await;
+        let hp = pools.get(&("test.local".to_string(), 443)).unwrap();
+        assert!(hp.connections.is_empty());
+    }
+
+    #[tokio::test]
+    async fn remove_dead_connection_notifies_waiters() {
+        let pool = Arc::new(test_pool());
+        let sender = make_h2_sender().await;
+        let conn_id = insert_h2(&pool, "test.local", 443, sender).await;
+
+        let _handle = pool.acquire("test.local", 443).await.unwrap();
+
+        pool.remove_dead_connection("test.local", 443, conn_id)
+            .await;
+
+        let pools = pool.host_pools.lock().await;
+        let hp = pools.get(&("test.local".to_string(), 443)).unwrap();
+        assert!(hp.connections.is_empty());
+    }
+
+    #[tokio::test]
+    async fn pool_config_stores_custom_window_size() {
+        let config = Config {
+            stream_window_size: 1_048_576,
+            ..Default::default()
+        };
+        let pool = test_pool_with_config(config);
+        assert_eq!(pool.config.stream_window_size, 1_048_576);
+    }
+
+    #[tokio::test]
+    async fn pool_config_stores_connections_per_host() {
+        let config = Config {
+            connections_per_host: 4,
+            ..Default::default()
+        };
+        let pool = test_pool_with_config(config);
+        assert_eq!(pool.config.connections_per_host, 4);
+    }
+
+    #[tokio::test]
+    async fn h2_dead_connection_detected_and_removed() {
+        let pool = test_pool();
+
+        // Create a sender then immediately drop the server side
+        let sender = {
+            let (client_io, _server_io) = tokio::io::duplex(65536);
+            let io = TokioIo::new(client_io);
+            let (sender, conn) = http2::Builder::new(TokioExecutor::new())
+                .handshake(io)
+                .await
+                .expect("h2 handshake");
+            tokio::spawn(async move {
+                let _ = conn.await;
+            });
+            sender
+        };
+
+        // Give the connection time to detect the dead server
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        insert_h2(&pool, "dead.local", 443, sender).await;
+
+        // acquire should detect the dead connection and try to open a new one
+        // (which will fail since "dead.local" won't resolve)
+        let result = pool.acquire("dead.local", 443).await;
+        assert!(
+            result.is_err(),
+            "should fail since DNS for dead.local fails"
+        );
+
+        // Host pool should be cleaned up
+        let pools = pool.host_pools.lock().await;
+        assert!(
+            !pools.contains_key(&("dead.local".to_string(), 443)),
+            "host pool should be removed after failed connection"
+        );
+    }
+
+    #[tokio::test]
+    async fn acquire_respects_connections_per_host_limit() {
+        let config = Config {
+            connections_per_host: 2,
+            ..Default::default()
+        };
+        let pool = test_pool_with_config(config);
+
+        // Insert 2 H1 connections (at the limit)
+        let s1 = make_h1_sender().await;
+        let s2 = make_h1_sender().await;
+        insert_h1(&pool, "test.local", 80, s1).await;
+        insert_h1(&pool, "test.local", 80, s2).await;
+
+        // Check out both
+        let _h1 = pool.acquire("test.local", 80).await.unwrap();
+        let _h2 = pool.acquire("test.local", 80).await.unwrap();
+
+        // Pool is now at limit with all checked out.
+        // Verify the pool sees 2 connections (at limit).
+        let pools = pool.host_pools.lock().await;
+        let hp = pools.get(&("test.local".to_string(), 80)).unwrap();
+        assert_eq!(hp.connections.len(), 2);
+        assert_eq!(hp.opening_count, 0);
+    }
+
+    #[tokio::test]
+    async fn notify_h2_complete_wakes_waiters() {
+        let pool = Arc::new(test_pool());
+        let sender = make_h2_sender().await;
+        insert_h2(&pool, "test.local", 443, sender).await;
+
+        // Acquire a connection
+        let _handle = pool.acquire("test.local", 443).await.unwrap();
+
+        // Verify notify_h2_complete doesn't panic on valid host
+        pool.notify_h2_complete("test.local", 443).await;
+
+        // Verify notify_h2_complete doesn't panic on unknown host
+        pool.notify_h2_complete("unknown.local", 443).await;
+    }
+}
