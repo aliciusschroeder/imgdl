@@ -4,7 +4,20 @@ all-features = true
 
 [advisories]
 yanked = "deny"
-ignore = []
+# The `unic-*` family is unmaintained upstream with no successor release. It
+# reaches us only through rustpython-parser, which pyo3-stub-gen uses to parse
+# signatures while generating the .pyi. Nothing here is reachable at runtime and
+# there is no version to upgrade to, so the alternative to ignoring them is a
+# permanently red audit job. Drop these once pyo3-stub-gen stops depending on
+# rustpython-parser.
+ignore = [
+    "RUSTSEC-2025-0075", # unic-char-range
+    "RUSTSEC-2025-0080", # unic-common
+    "RUSTSEC-2025-0081", # unic-char-property
+    "RUSTSEC-2025-0090", # unic-emoji-char
+    "RUSTSEC-2025-0098", # unic-ucd-version
+    "RUSTSEC-2025-0100", # unic-ucd-ident
+]
 
 [licenses]
 # Everything in the current tree is one of these. A new dependency with a
@@ -20,6 +33,10 @@ allow = [
     "Unicode-3.0",
     "Zlib",
     "CDLA-Permissive-2.0",
+    # Both arrive with pyo3-stub-gen's parser: tiny-keccak is CC0-1.0 (public
+    # domain dedication), unicode_names2 carries the Unicode data licence.
+    "CC0-1.0",
+    "Unicode-DFS-2016",
 ]
 confidence-threshold = 0.9
 
