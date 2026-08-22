@@ -54,6 +54,16 @@ def test_stub_matches_the_runtime_module():
         assert hasattr(imgdl._imgdl, name), name
 
 
+def test_stub_narrows_naming_strategy_values():
+    """The generated stub exposes runtime-accepted naming strategies precisely."""
+    stub = (Path(imgdl.__file__).parent / "_imgdl.pyi").read_text()
+    naming_strategy_type = (
+        'typing.Literal["content_hash", "url_based", "sequential", "file_header"]'
+    )
+    assert f"def naming_strategy(self) -> {naming_strategy_type}: ..." in stub
+    assert f"naming_strategy: {naming_strategy_type} = 'url_based'" in stub
+
+
 def test_extension_is_private():
     """The compiled module is an implementation detail behind __init__.py."""
     assert imgdl._imgdl.__name__ == "imgdl._imgdl"
