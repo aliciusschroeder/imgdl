@@ -72,7 +72,7 @@ where
         match result {
             Ok(data) => return (Ok(data), attempt),
             Err(ref e) if !is_retryable(e) => return (result, attempt),
-            Err(ref e) if attempt >= max_retries => return (result, attempt),
+            Err(_) if attempt >= max_retries => return (result, attempt),
             Err(ref e) => {
                 let retry_after = match e {
                     DownloadError::HttpStatus { retry_after, .. } => *retry_after,

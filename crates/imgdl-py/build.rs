@@ -25,7 +25,7 @@ fn main() {
 
     // `lib_dir` is None for a static/embedded build or when `extension-module`
     // is on — nothing to do in those cases.
-    let Some(lib_dir) = config.lib_dir.as_deref() else {
+    let Some(lib_dir) = config.lib_dir() else {
         return;
     };
 
