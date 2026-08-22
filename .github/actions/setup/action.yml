@@ -44,6 +44,10 @@ runs:
     - uses: astral-sh/setup-uv@v7
       with:
         enable-cache: true
+        # Jobs that only need an interpreter (rust-tests, audit) never run
+        # `uv sync`, so the cache directory is empty at post-job time. Without
+        # this, that empty cache fails the whole job during cleanup.
+        ignore-nothing-to-cache: true
         python-version: ${{ inputs.python-version }}
         cache-dependency-glob: |
           uv.lock
