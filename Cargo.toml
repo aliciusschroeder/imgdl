@@ -12,7 +12,7 @@ members = ["crates/*"]
 [workspace.package]
 version = "0.2.0"
 edition = "2021"
-rust-version = "1.85"
+rust-version = "1.88"
 license = "MIT"
 repository = "https://github.com/aliciusschroeder/imgdl"
 homepage = "https://github.com/aliciusschroeder/imgdl"
@@ -21,9 +21,9 @@ authors = ["Alicius Schröder"]
 [workspace.dependencies]
 imgdl-core = { path = "crates/imgdl-core", version = "0.2.0" }
 
-pyo3 = "0.28"
-pyo3-stub-gen = "0.19"
-pyo3-build-config = "0.28"
+pyo3 = "0.29"
+pyo3-stub-gen = "0.23"
+pyo3-build-config = "0.29"
 
 tracing = "0.1"
 
