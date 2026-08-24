@@ -21,6 +21,10 @@ from __future__ import annotations
 from imgdl import _imgdl
 from imgdl._imgdl import Config, DownloadResult, download_images
 
+from typing import Literal
+
+NamingStrategy = Literal["content_hash", "url_based", "sequential", "file_header"]
+
 #: Version of the compiled extension, single-sourced from ``Cargo.toml`` via
 #: ``env!("CARGO_PKG_VERSION")``. Correct even in an uninstalled
 #: ``maturin develop`` build, where ``importlib.metadata.version("imgdl")`` can
@@ -30,4 +34,4 @@ from imgdl._imgdl import Config, DownloadResult, download_images
 #: constants, so the generated stub cannot declare it.
 __version__: str = getattr(_imgdl, "__version__", "0+unknown")
 
-__all__ = ["Config", "DownloadResult", "__version__", "download_images"]
+__all__ = ["Config", "DownloadResult", "NamingStrategy", "__version__", "download_images"]
