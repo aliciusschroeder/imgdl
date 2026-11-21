@@ -11,7 +11,7 @@
 # maturin at the binding crate instead.
 # ---------------------------------------------------------------------------
 [build-system]
-requires = ["maturin>=1.9,<2.0"]
+requires = ["maturin>=1.16.0,<2.0"]
 build-backend = "maturin"
 
 [project]
@@ -58,16 +58,16 @@ include = [{ path = "python/imgdl/_imgdl.pyi", format = "wheel" }]
 # --------------------------------------------------------------------------
 [dependency-groups]
 dev = [
-    "maturin>=1.9,<2.0",
-    "pytest>=8.3",
+    "maturin>=1.16.0,<2.0",
+    "pytest>=9.2.0",
     "pytest-cov>=5.0",
     "pytest-timeout>=2.3",
     "pytest-xdist>=3.6",
-    "ruff>=0.6",
-    "mypy>=1.11",
+    "ruff>=0.17.5",
+    "mypy>=2.4.1",
     "pre-commit>=3.8",
 ]
-bench = ["pytest-benchmark>=4.0"]
+bench = ["pytest-benchmark>=5.3.1"]
 
 [tool.uv]
 # Without this, uv happily serves a stale compiled extension after you edit
