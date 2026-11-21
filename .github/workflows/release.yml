@@ -31,7 +31,7 @@ jobs:
     outputs:
       version: ${{ steps.check.outputs.version }}
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - id: check
         run: |
           set -euo pipefail
@@ -88,7 +88,7 @@ jobs:
               manylinux: "",
             }
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       - uses: PyO3/maturin-action@v1
         with:
@@ -119,7 +119,7 @@ jobs:
     needs: guard
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - uses: PyO3/maturin-action@v1
         with:
           command: sdist
@@ -150,7 +150,7 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - uses: actions/download-artifact@v8
         with:
           pattern: wheels-*
@@ -160,7 +160,7 @@ jobs:
       # Wheels attached to the Release are what lets a consumer with no Rust
       # toolchain install a pinned build straight from GitHub:
       #   uv add https://github.com/aliciusschroeder/imgdl/releases/download/vX/imgdl-...whl
-      - uses: softprops/action-gh-release@v2
+      - uses: softprops/action-gh-release@v3
         with:
           files: dist/*
           generate_release_notes: true
